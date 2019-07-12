@@ -103,18 +103,24 @@ static void fcover_key_handler(struct work_struct *work)
 		spin_lock(&fcover_lock);
 		fcover_close_flag = new_fcover;
 		spin_unlock(&fcover_lock);
-
+		
 		if(fcover_close_flag == FCOVER_CLOSE)
 		{
-			input_report_switch(kpd_accdet_dev, SW_LID, 1);
+			input_report_key(kpd_accdet_dev, KEY_F11, 1);
 			input_sync(kpd_accdet_dev);
-			printk("zhaolong=======FCOVER_CLOSE====\n");
+			mdelay(10);
+			input_report_key(kpd_accdet_dev, KEY_F11, 0);
+      input_sync(kpd_accdet_dev);
+     	printk("zhaolong=======F11====\n");
 		}
 		else  // open
 		{
-			input_report_switch(kpd_accdet_dev, SW_LID, 0);
-			input_sync(kpd_accdet_dev);
-			printk("zhaolong=======FCOVER_OPEN====\n");
+			input_report_key(kpd_accdet_dev, KEY_F12, 1);
+      input_sync(kpd_accdet_dev);
+      mdelay(10);
+			input_report_key(kpd_accdet_dev, KEY_F12, 0);
+      input_sync(kpd_accdet_dev);
+      printk("zhaolong=======F12====\n");
 		}
 		switch_set_state((struct switch_dev *)&fcover_data, fcover_close_flag);
 	}
@@ -203,7 +209,7 @@ static int hall_pdrv_probe(struct platform_device *pdev)
 	u32 ints1[2] = { 0, 0 };
 	struct device_node *node = NULL;
 
-	printk("hall probe start!!!\n");
+	printk("%s,hall probe start!!!\n",__func__);
 	
 	fcoverPltFmDev = pdev;
 
@@ -214,10 +220,9 @@ static int hall_pdrv_probe(struct platform_device *pdev)
 //		return -ENOMEM;
 //	}
 
-	__set_bit(EV_SW, kpd_accdet_dev->evbit);
-	__set_bit(SW_LID, kpd_accdet_dev->swbit);
-
-	input_set_capability(kpd_accdet_dev, EV_SW, SW_LID);
+	__set_bit(EV_KEY, kpd_accdet_dev->evbit);
+	__set_bit(KEY_F11, kpd_accdet_dev->keybit);
+	__set_bit(KEY_F12, kpd_accdet_dev->keybit);		
 
 //	hall_input_dev->id.bustype = BUS_HOST;
 //	hall_input_dev->name = HALL_NAME;
@@ -248,14 +253,20 @@ static int hall_pdrv_probe(struct platform_device *pdev)
 	INIT_WORK(&fcover_work, fcover_key_handler);
 
 	fcover_close_flag = gpio_get_value(hallgpiopin);
-	
+
 	node = of_find_matching_node(node, hall_of_match);
+	printk("%s():find node->name = %s\n",__func__,node->name);
 	if (node) {
 		of_property_read_u32_array(node, "debounce", ints, ARRAY_SIZE(ints));
 		of_property_read_u32_array(node, "interrupts", ints1, ARRAY_SIZE(ints1));
+
 		hallgpiopin = ints[0];
 		halldebounce = ints[1];
 		hall_eint_type = ints1[1];
+		
+                printk("%s():hallgpiopin =%d, halldebounce=%d, hall_eint_type = %d\n",__func__,
+                        hallgpiopin,halldebounce,hall_eint_type);
+
 		gpio_set_debounce(hallgpiopin, halldebounce);
 		hall_irqnr = irq_of_parse_and_map(node, 0);
 		ret = request_irq(hall_irqnr, (irq_handler_t)hall_fcover_eint_handler, IRQF_TRIGGER_NONE, "hall-eint", NULL);
@@ -268,7 +279,7 @@ static int hall_pdrv_probe(struct platform_device *pdev)
 	} else {
 		printk("[hall]%s can't find compatible node\n", __func__);
 	}
-	
+
 	printk("hall_fcover_eint_handler done..\n");
 	
 	fcover_data.name = "hall";

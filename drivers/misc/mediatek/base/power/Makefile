@@ -36,6 +36,7 @@ obj-$(CONFIG_ARCH_MT8173) += $(subst ",,$(CONFIG_MTK_PLATFORM))/
 obj-$(CONFIG_ARCH_MT8127) += $(subst ",,$(CONFIG_MTK_PLATFORM))/
 obj-$(CONFIG_MACH_MT2701) += $(subst ",,$(CONFIG_MTK_PLATFORM))/
 obj-$(CONFIG_ARCH_MT7623) += $(subst ",,$(CONFIG_MTK_PLATFORM))/
+obj-$(CONFIG_MT2701_DCM)  += mt2701_dcm/
 obj-$(CONFIG_MACH_MT2701) += hps/v1/
 obj-$(CONFIG_ARCH_MT7623) += hps/v1/
 obj-$(CONFIG_ARCH_MT8127) += hps/v1/
@@ -53,11 +54,6 @@ obj-$(CONFIG_ARCH_MT6757) += spm_v2/
 obj-$(CONFIG_ARCH_MT6797) += spm_v2/
 #obj-$(CONFIG_ARCH_ELBRUS) += spm_v3/
 obj-$(CONFIG_ARCH_ELBRUS) += clkbuf_v1/
-
-ifeq ($(CONFIG_MTK_PLATFORM),"elbrus")
-obj-y += cpufreq_v1/
-endif
-
 obj-$(CONFIG_ARCH_MT6755) += pbm_v1/
 obj-$(CONFIG_ARCH_MT6797) += pbm_v1/
 obj-$(CONFIG_ARCH_MT6757) += pbm_v1/
@@ -65,5 +61,6 @@ obj-$(CONFIG_ARCH_MT6735) += cpuidle_v1/
 obj-$(CONFIG_ARCH_MT6735M) += cpuidle_v1/
 obj-$(CONFIG_ARCH_MT6753) += cpuidle_v1/
 obj-$(CONFIG_ARCH_MT6580) += cpuidle_v1/
+obj-$(CONFIG_ARCH_MT6570) += cpuidle_v1/
 obj-$(CONFIG_ARCH_MT6755) += cpuidle_v1/
 obj-$(CONFIG_ARCH_MT6797) += cpuidle_v1/

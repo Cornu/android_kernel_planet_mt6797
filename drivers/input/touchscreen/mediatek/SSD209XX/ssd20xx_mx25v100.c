@@ -148,7 +148,7 @@ int ds16_seeprom_general_ucmd_read(struct solomon_device *dev, u8 *Wbuf,
 	int seeprom_rs_wd_ndelay = 0;
 	int seeprom_rs_rd_ndelay = 0;
 	int seeprom_rs_wd_nbyte = 0;
-	int ws_wd_nbyte;
+	int ws_wd_nbyte = 0;
 	int ws_wd_ndelay;
 
 #if I2C_DMA_SUPPORT
@@ -848,8 +848,7 @@ int ds16_seeprom_write_nbyte_mx25v1001e(struct solomon_device *dev, u32 st,
  *
  *	return : >= 0 thend success, else ( < 0 ) fail
  */
-int ds16_seeprom_write_nbyte_mx25v1006e(struct solomon_device *dev,
-		u32 st, u8 *data_buf, int nbyte)
+int ds16_seeprom_write_nbyte_mx25v1006e(struct solomon_device *dev,u32 st, u8 *data_buf, int nbyte)
 {
 	int err = 0;
 	int data_length = 0;
@@ -864,7 +863,7 @@ int ds16_seeprom_write_nbyte_mx25v1006e(struct solomon_device *dev,
 	 * 256-192 = 64. So, the first write data count is 64.
 	 */
 	data_length = nbyte;
-	SOLOMON_WARNNING("write nbyte MX25V1006E");
+	SOLOMON_WARNNING("write nbyte MX25V1006E target Add = 0x%x, size = 0x%x",st,nbyte);
 	first_send_length = st%m_SEEPROM_WriteMax_Length;
 
 	if (first_send_length != 0) {
@@ -950,8 +949,8 @@ int ds16_seeprom_verify(struct solomon_device *dev, struct solomon_fw *fw)
 		return -2;
 	}
 
-	err = ds16_seeprom_read_nbyte(dev, fw->address, verify_data,
-			fw->byte_cnt);
+	err = ds16_seeprom_read_nbyte(dev, fw->address, verify_data, fw->byte_cnt);
+	SOLOMON_WARNNING("[ISP]ds16_seeprom_read_nbyte = 0x%x, len = %d\n",(int)(fw->address),(fw->byte_cnt));
 
 	if (err != 0) {
 		SOLOMON_WARNNING("Read fail for Verify");

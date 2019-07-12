@@ -29,7 +29,6 @@
 #include <linux/of_gpio.h>
 #include <linux/of_irq.h>
 #include <linux/interrupt.h> //add for IRQF_***
-
 #ifdef SUPPORT_MTK_ESD_RECOVERY
 extern int primary_display_suspend(void);
 extern int primary_display_resume(void);
@@ -52,8 +51,18 @@ dma_addr_t wrDMABuf_pa = 0;
 #endif
 #endif
 
+
+int st_trigger = 0;
+u16 g_st_results[6];
+
+unsigned int ssd20xx_tp_report_panel_dead = 0;
+
 int init_ds_flag = 0;
 int init_tmc_flag = 0;
+
+int init_bringUP_flag = 0;
+
+
 #if defined(SUPPORT_BOOTUP_FORCE_FW_UPGRADE_BINFILE)
 int found_force_bin_file = 0;
 #endif
@@ -79,6 +88,7 @@ enum _ts_work_procedure {
 static int solomon_send_key_du(struct input_dev *input, unsigned int key);
 static int solomon_report_release(struct solomon_device *);
 static int solomon_init_config(struct solomon_device *ftdev);
+static int solomon_fw_init(struct solomon_device *ftdev);  // HTC_L2052_A01-1765
 static int solomon_pre_init(struct solomon_device *ftdev);
 static int solomon_init(struct solomon_device *ftdev);
 static int solomon_power_control(struct solomon_device *ftdev, u8 mode);
@@ -138,8 +148,7 @@ static int lpm_gesture_keys[] = {
 
 volatile int m_power_status = LPM_RESUME;	/* 0:resume , 1:suspend */
 
-static int solomon_read_points(struct solomon_device *ftdev,
-	struct solomon_data *data);
+static int solomon_read_points(struct solomon_device *ftdev, struct solomon_data *data);
 #endif	/* SUPPORT_LPM */
 
 int m_mp_total_count = -1;
@@ -460,6 +469,30 @@ static inline s32 ts_read_tmc_i2c(struct i2c_client *client, u16 *i2c_len)
 	return err;
 }
 
+#ifdef SUPPORT_SSD2025
+static inline s32 solomon_get_version(struct i2c_client *client, struct solomon_version *version)
+{
+	int err = 0;
+	u32 temp[7] = {0,};
+	int i = 0;
+
+	err = ts_read_data(client,
+		SOLOMON_DSIPLAY_VERSION, (u8 *)(temp), 28);
+
+	if (err < 0) {
+		SOLOMON_DEBUG("error : read version fail!!");
+		return -EAGAIN;
+	}
+
+	for (i = 0; i < 7; i++)
+		SOLOMON_WARNNING("[%d] 0x%08x", i, temp[i]);
+
+	memcpy( (u8 *)(&(version->display_version)), (u8 *)(temp+1), sizeof(struct solomon_version));
+
+	return err;
+}
+#endif
+
 static inline s32 ts_write_tmc_i2c(struct i2c_client *client, u16 i2c_len)
 {
 	int err = 0;
@@ -477,13 +510,11 @@ static inline s32 ts_write_tmc_i2c(struct i2c_client *client, u16 i2c_len)
 #endif	/* SUPPORT_TMC_I2C_LENGTH */
 
 /* get gesture */
-static inline s32 ts_read_gesture(struct i2c_client *client,
-		u16 *gesture, u16 length)
+static inline s32 ts_read_gesture(struct i2c_client *client, u16 *gesture, u16 length)
 {
 	int err = 0;
 
-	err = ts_read_data(client,
-			SOLOMON_GET_GESTURE, (u8 *)(gesture), length);
+	err = ts_read_data(client, SOLOMON_GET_GESTURE, (u8 *)(gesture), length);
 
 	if (err < 0) {
 		SOLOMON_WARNNING("error : read Gesture");
@@ -494,16 +525,14 @@ static inline s32 ts_read_gesture(struct i2c_client *client,
 	return err;
 }
 #ifdef SUPPORT_GESTURE_COORDINATE
-static int solomon_read_gesture_coordinate(struct i2c_client *client,
-		u16 length, u16 *coordinate)
+static int solomon_read_gesture_coordinate(struct i2c_client *client, u16 length, u16 *coordinate)
 {
 	int err = 0;
 
 	if (length == 0 || coordinate == NULL)
 		return 0;
 
-	err = ts_read_data(client,
-			SOLOMON_GET_GESTURE_COORDINATE, (u8 *)(coordinate), length);
+	err = ts_read_data(client, SOLOMON_GET_GESTURE_COORDINATE, (u8 *)(coordinate), length);
 
 	if (err < 0) {
 		SOLOMON_WARNNING("error : read Gesture coordinate!!");
@@ -554,8 +583,7 @@ static int solomon_initialize_input_device(struct solomon_device *ftdev)
 	input_set_abs_params(input_dev, ABS_MT_POSITION_X,
 			     0, ftdev->ftconfig->max_x, 0, 0);	
 	input_set_abs_params(input_dev, ABS_MT_POSITION_Y,
-			     0, ftdev->ftconfig->max_y, 0, 0);
-	
+			     0, ftdev->ftconfig->max_y, 0, 0);	
 	input_set_abs_params(input_dev, ABS_MT_PRESSURE,
 			     0, ftdev->ftconfig->max_weight, 0, 0);
 	error = input_register_device(input_dev);
@@ -811,7 +839,7 @@ static void esd_timer_start(u16 sec, struct solomon_device *ftdev)
 	init_timer(&(ftdev->esd_tmr));
 	ftdev->esd_tmr.data = (unsigned long)(ftdev);
 	ftdev->esd_tmr.function = esd_timeout_handler;
-	ftdev->esd_tmr.expires = jiffies + HZ*sec;
+	ftdev->esd_tmr.expires = jiffies + (HZ*sec);
 	ftdev->p_esd_tmr = &ftdev->esd_tmr;
 	add_timer(&ftdev->esd_tmr);
 }
@@ -1233,6 +1261,7 @@ int ds_eflash_read(struct i2c_client *client, int addr, u8 *rd, int rLen)
 	return ret;
 }
 
+#ifndef SUPPORT_SSD2025
 #ifdef SUPPORT_ES2
 /* read version */
 static int ds_read_version(struct solomon_device *ftdev, u8 *version, int len)
@@ -1285,6 +1314,7 @@ static int ds_process_version(struct solomon_device *ftdev)
 	SOLOMON_WARNNING("ES Version : %d", ftdev->es_version);
 	return 0;
 }
+#endif
 #endif
 static int ds_init_code(struct i2c_client *client)
 {
@@ -1349,6 +1379,8 @@ static s32 int_pin_check(struct solomon_device *ftdev, int retry)
 	if (retry < 1)
 		ret = -1;
 
+	SOLOMON_WARNNING("[ISP]int_pin_check = %d\n",ret);
+	
 	return ret;
 }
 
@@ -1371,6 +1403,27 @@ static s32 solomon_set_esdtime(struct solomon_device *ftdev, u16 value)
 	return err;
 }
 #endif
+
+static s32 solomon_set_AFE_limit(struct solomon_device *ftdev, u16 max_value, u16 min_value)
+{
+        int err;
+
+        SOLOMON_WARNNING("AFE limit : %d to %d", min_value, max_value);
+
+        err = ts_write_data(ftdev->client,
+                        SOLOMON_AFE_MAX_LIMIT, (u8 *)&(max_value), 2);
+
+        if (err < 0)
+                SOLOMON_WARNNING("Fail to set AFE Max limit.");
+
+        err = ts_write_data(ftdev->client,
+                        SOLOMON_AFE_MIN_LIMIT, (u8 *)&(min_value), 2);
+
+        if (err < 0)
+                SOLOMON_WARNNING("Fail to set AFE Min limit.");
+ 
+        return err;
+}
 
 #ifdef SUPPORT_LPM
 static inline s32 lpm_end(struct solomon_device *ftdev)
@@ -1401,6 +1454,7 @@ static inline s32 lpm_end_clear(struct solomon_device *ftdev)
 	int err = 0;
 	int retry = 500;
 
+	SOLOMON_WARNNING("[ISP]lpm_end_clear\n");
 	err = int_pin_check(ftdev, retry);
 	int_clear_cmd(ftdev->client);
 
@@ -1675,8 +1729,13 @@ static long ts_misc_fops_ioctl(struct file *filp,
 
 	switch (cmd) {
 		case TOUCH_IOCTL_GET_FW_VERSION:
+#ifdef SUPPORT_SSD2025
+		if (copy_to_user(argp, (u8 *)(&misc_dev->fw_version.display_version),
+			sizeof(struct solomon_version)))
+#else
 			if (copy_to_user(argp, misc_dev->ftconfig->fw_ver,
 						sizeof(misc_dev->ftconfig->fw_ver)))
+#endif
 				return -1;
 			break;
 #ifdef SUPPORT_GESTURE_DEMO
@@ -1906,16 +1965,16 @@ out_graph:
 			return ret;
 
 	case TOUCH_IOCTL_GET_RAW_DATA:
-		if (misc_dev->touch_mode == TOUCH_POINT_MODE &&
-				misc_dev->mptest_mode == MPTEST_STOP)
+	
+		if ((misc_dev->touch_mode == TOUCH_POINT_MODE) && (misc_dev->mptest_mode == MPTEST_STOP))
 			return -1;
-
-			if (copy_from_user(&raw_ioctl,
-						argp, sizeof(raw_ioctl))) {
+#if 1
+			if (copy_from_user(&raw_ioctl,argp, sizeof(struct _raw_ioctl)))
+			{
 				SOLOMON_WARNNING("error : copy_from_user");
 				return -1;
 			}
-
+#endif
 			u8Data = get_front_queue_buff(misc_dev->ftdata);
 
 			if (u8Data == NULL) {
@@ -1923,8 +1982,7 @@ out_graph:
 				return -3;
 			}
 
-			if (copy_to_user(raw_ioctl.buf,
-						u8Data, raw_ioctl.sz)) {
+			if (copy_to_user(raw_ioctl.buf,u8Data, raw_ioctl.sz)) {
 				SOLOMON_WARNNING("error : copy_to_user");
 				return -1;
 			}
@@ -1971,9 +2029,9 @@ out_graph:
 			if (ret < 0)
 				SOLOMON_WARNNING("firmware update by file failed");
 
-			//solomon_bootup_multifw();
-			msleep(50);
-			solomon_init(misc_dev);
+			solomon_bootup_multifw();   //HTC_L2052_A01-1765
+			msleep(50);                 //HTC_L2052_A01-1765
+			solomon_init(misc_dev);		//HTC_L2052_A01-1765
 		/* solomon_reset(); */
 			/* solomon_power_control(misc_dev, POWER_RESET); */
 #if ESD_TIMER_ENABLE
@@ -2004,7 +2062,7 @@ static const struct file_operations ts_misc_fops = {
 
 static struct miscdevice touch_misc_dev = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name = "sentron_touch_misc",
+	.name = "solomon_touch_misc",
 	.fops = &ts_misc_fops,
 };
 
@@ -2013,18 +2071,29 @@ static int solomon_power_control(struct solomon_device *ftdev, u8 mode)
 {
 	int err = 0;
 
-	if (mode == POWER_OFF) {
-	} else if (mode == POWER_ON) {
-	} else if (mode == POWER_ON_SEQUENCE) {
-		SOLOMON_DEBUG("POWER_SEQUENCE");
-#ifdef SUPPORT_ESD_CHECKSUM
-		ftdev->state_flag = 0;
-#endif
+	if (mode == POWER_OFF) 
+	{
+		SOLOMON_DEBUG("solomon_power_control = POWER_OFF\n");
+	} 
+	else if (mode == POWER_ON) 
+	{
+		SOLOMON_DEBUG("solomon_power_control = POWER_ON\n");
+	} 
+	else if (mode == POWER_ON_SEQUENCE) 
+	{
+		SOLOMON_DEBUG("solomon_power_control = POWER_ON_SEQUENCE\n");
+		//SOLOMON_DEBUG("POWER_SEQUENCE");
+		#ifdef SUPPORT_ESD_CHECKSUM
+			ftdev->state_flag = 0;
+		#endif
 		solomon_reset();
-	} else if (mode == POWER_RESET) {
-#ifdef SUPPORT_ESD_CHECKSUM
-		ftdev->state_flag = 0;
-#endif
+	} 
+	else if (mode == POWER_RESET) 
+	{
+		SOLOMON_DEBUG("solomon_power_control = POWER_RESET\n");
+		#ifdef SUPPORT_ESD_CHECKSUM
+			ftdev->state_flag = 0;
+		#endif
 		solomon_reset();
 	}
 
@@ -2052,45 +2121,56 @@ int solomon_reset(void)
 	msleep(80);
 #endif 
 	/* wait DS init; */
+	SOLOMON_WARNNING("[ISP]solomon_reset\n");
+	
 	if (misc_dev != NULL)
 		int_pin_check(misc_dev, retry * 2);
 
 	return 0;
 }
 
-//int solomon_goto_bios(void)
-//{
-//	int retry = 100;
-//	int val = 0x00;
+int solomon_goto_bios(void)  //HTC_L2052_A01-1765
+{
+	int retry = 100;
+	int val = 0x00;
+	int ret = 0;
+	SOLOMON_WARNNING("TP go to bios");
 
-//	SOLOMON_WARNNING("TP go to bios");
+	ret = ts_write_data(misc_dev->client, SOLOMON_GOTO_BIOS, (u8 *)&val, 2);
 
-//	ts_write_data(misc_dev->client, SOLOMON_GOTO_BIOS, (u8 *)&val, 2);
+	SOLOMON_WARNNING("[ISP]solomon_goto_bios\n");
+	if(int_pin_check(misc_dev, retry * 2) < 0 || ret < 0)
+	{	
+		SOLOMON_WARNNING("Unable to go to bios by command, force reset TP");
+		//gpio_set_value(misc_dev->reset_pin, 0);
+		tpd_gpio_output(tpd_rst_gpio_number, 0);
+		msleep(5);
+		//gpio_set_value(misc_dev->reset_pin, 1);
+		tpd_gpio_output(tpd_rst_gpio_number, 1);
+		msleep(20);
+	}
+	return 0;
+}
 
-//	int_pin_check(misc_dev, retry * 2);
+int solomon_bootup_multifw(void)
+{
+	int ret = 0;
+	u8 wd[4];
 
-//	return 0;
-//}
+	wd[0] = 0x00;
+	wd[1] = 0x00;
+	wd[2] = 0x00;
+	wd[3] = 0x00;
 
-//int solomon_bootup_multifw(void)
-//{
-//	int ret = 0;
-//	u8 wd[4];
-//
-//	wd[0] = 0x00;
-//	wd[1] = 0x00;
-//	wd[2] = 0x00;
-//	wd[3] = 0x00;
-//
-//	ret = ts_write_data(misc_dev->client, DS_BOOTUP_MULTIFW, wd, 4);
-//
-//	if (ret < 0) {
-//		SOLOMON_WARNNING("0x%04X i2c write fail(2)!!", DS_BOOTUP_MULTIFW);
-//		return ret;
-//	}
-//
-//	return ret;
-//}
+	ret = ts_write_data(misc_dev->client, DS_BOOTUP_MULTIFW, wd, 4);
+
+	if (ret < 0) {
+		SOLOMON_WARNNING("0x%04X i2c write fail(2)!!", DS_BOOTUP_MULTIFW);
+		return ret;
+	}
+
+	return ret;
+}
 
 /* Read HW info use I2C */
 int solomon_read_hw_info(struct i2c_client *client, u16 *info)
@@ -2159,9 +2239,34 @@ int solomon_hw_check(struct solomon_device *ftdev)
 	return 0;
 }
 
+static int solomon_fw_init(struct solomon_device *ftdev)  //HTC_L2052_A01-1765
+{
+
+	char fw_version[64];
+	if (ds_read_boot_st(ftdev->client, (u16 *)&(ftdev->boot_flag)) < 0)
+		return -1;
+
+	SOLOMON_WARNNING("read boot st read(2) : 0x%04x", ftdev->boot_flag);
+
+	if (ds_init_code(ftdev->client) < 0)
+		return -1;
+
+	if (solomon_get_version_boot(ftdev) < 0)
+		return -1;
+
+	SOLOMON_WARNNING("swb.solomom display_version = %04x\n",ftdev->fw_version.display_version);
+	memset(fw_version, 0, sizeof(fw_version));
+	sprintf(fw_version, "[FW]0x%04x,[IC]ssd2092", ftdev->fw_version.display_version);
+	//update_tp_fm_info(fw_version);
+	
+	return 0;
+}
+
+
 static int solomon_pre_init(struct solomon_device *ftdev)
 {
 	int ret = 0;
+	int retry = 5;  //HTC_L2052_A01-1765
 #if defined(SUPPORT_BOOTUP_FORCE_FW_UPGRADE_BINFILE)
 	const char *fw_name = FW_BOOTUP_FORCE_FULL_PATH;
 	int err = 0;
@@ -2181,13 +2286,43 @@ static int solomon_pre_init(struct solomon_device *ftdev)
 
 	if (solomon_get_version_boot(ftdev) < 0)
 		return -1;
+		
+	if (init_bringUP_flag)
+	{		
+		init_bringUP_flag = 0;
+		
+		ret = solomon_firmware_fw_check(ftdev);	
+		if (ret < 0)	
+		{
+			SOLOMON_WARNNING("[ISP]solomon_pre_init 3 ret = %d\n",ret);
+			if(ret < 0)
+			{
+				do{
+					SOLOMON_WARNNING("MCU Start_3 fail! Download FW again.");
+					ftdev->work_procedure = TS_IN_UPGRADE;
+					found_force_bin_file = 1;
+					ret = solomon_fw_update(ftdev);
+				} while (ret < 0 && retry-- > 0);
+	  
+				SOLOMON_WARNNING("MCU Started_3 after FW recovery. ret = %d, Retry = %d", ret, retry);	
+							
+				if(ret == 0)
+					SOLOMON_WARNNING("MCU Started_3 after FW recovery. Retry = %d", retry);
+			}
+			else
+			{
+				SOLOMON_DEBUG("MCU Started_3");
+			}
+			SOLOMON_WARNNING("Update routine closed3!!");	
+		}
+	}
+	
 
 	if(init_ds_flag == 1)
 	{
 #if (defined(SUPPORT_BOOTUP_FORCE_FW_UPGRADE_BINFILE) || defined(SUPPORT_BOOTUP_FW_UPGRADE_BINFILE))
-		err = request_firmware_nowait(THIS_MODULE, true, fw_name,
-			&ftdev->client->dev, GFP_KERNEL, ftdev,
-			solomon_fw_update_controller);
+		printk("[ISP]SUPPORT_BOOTUP_FORCE_FW_UPGRADE_BINFILE \n");
+		err = request_firmware_nowait(THIS_MODULE, true, fw_name, &ftdev->client->dev, GFP_KERNEL, ftdev, solomon_fw_update_controller);
 		if (err)
 		{
 			SOLOMON_WARNNING("failed to schedule firmware update\n");
@@ -2195,6 +2330,9 @@ static int solomon_pre_init(struct solomon_device *ftdev)
 		}
 #else
 #if defined(SUPPORT_BOOTUP_FW_UPGRADE_HEADER)
+
+		printk("[ISP]SUPPORT_BOOTUP_FW_UPGRADE_HEADER \n");
+
 		solomon_firmware_pre_boot_up_check_head(ftdev);
 #endif
 		if (ds_clear_int(ftdev->client) < 0)
@@ -2661,6 +2799,8 @@ static int ssd20xx_send_key(struct solomon_device *ftdev, u16 keydown,
 
 	return err;
 }
+
+#ifndef SUPPORT_SSD2025
 #ifndef SUPPORT_PROTOCOL_6BYTES
 static int solomon_read_keydata_android(struct solomon_device *ftdev)
 {
@@ -2683,6 +2823,7 @@ static int solomon_read_keydata_android(struct solomon_device *ftdev)
 	return err;
 }
 #endif	/* SUPPORT_PROTOCOL_6BYTES */
+#endif
 
 #endif	/* SUPPORT_KEY_BUTTON */
 
@@ -2804,11 +2945,19 @@ end_gesture:
 			solomon_send_key(tpd->dev, 97, 1);
 			solomon_send_key(tpd->dev, 97, 0);
 #endif	/* SUPPORT_GESTURE_DEMO */
-	}
+
+		SOLOMON_DEBUG("GESTURE : 0x%02x", (int)gesture_key2);
+
+		/* android do missing a event. So, need to delay */
+		mdelay(100);
+		solomon_gesture_report(ftdev, gesture_key2);
+
+		}
 out:
 	return err;
 }
 
+#ifndef SUPPORT_SSD2025
 #ifndef SUPPORT_PROTOCOL_6BYTES
 static int solomon_read_gesture(struct solomon_device *ftdev)
 {
@@ -2823,6 +2972,7 @@ static int solomon_read_gesture(struct solomon_device *ftdev)
 
 	return err;
 }
+#endif
 #endif
 #endif	/* SUPPORT_LPM */
 
@@ -2842,6 +2992,51 @@ static int solomon_read_aux(struct i2c_client *client, u16 *aux)
 
 }
 #endif	/* SUPPORT_AUX */
+
+#ifdef SUPPORT_SELF_TEST
+static int solomon_writevfs_self_test(u16 *str)
+{
+	struct file *src;
+	mm_segment_t oldfs;
+	u8 buf[100];
+	
+	oldfs = get_fs();
+	set_fs(KERNEL_DS);
+
+	src = filp_open(SELF_TEST_PATH, O_CREAT|O_WRONLY, S_IRUSR|S_IRGRP|S_IROTH);
+	if (IS_ERR(src))
+	{
+		SOLOMON_WARNNING("file create error!!");
+		return 0;
+	}
+
+	sprintf(buf, "Results,NM Max,NM Min,Jitter,OS Max,OS Min\r\n");
+	sprintf(buf+strlen(buf), "%d,%d,%d,%d,%d,%d\r\n", str[0],str[1],str[2],str[3],str[4],((short *)str)[5]);
+
+	vfs_write(src, (char __user *)buf, strlen(buf), &src->f_pos);
+
+	filp_close(src, NULL);
+	set_fs(oldfs);
+
+	return 0;
+}
+
+static int solomon_read_self_test(struct i2c_client *client, u16 *str)
+{
+	int err = 0;
+
+	err = ts_read_data(client, SOLOMON_SELF_TEST, (u8 *)(str), 12);
+	if (err < 0)
+		SOLOMON_WARNNING("error read AUX info using i2c.-");
+
+	SOLOMON_WARNNING("Self Test Results: 0x%02x", str[0]);
+	SOLOMON_WARNNING("Range (%d, %d)", str[1], str[2]);
+	SOLOMON_WARNNING("Jitter (%d)", str[3]);
+	SOLOMON_WARNNING("Open Short (%d, %d)",  str[4], ((short *)str)[5]);
+
+	return err;
+}
+#endif	/* SUPPORT_SELF_TEST */
 
 static int solomon_check_skiptime(unsigned long msecs)
 {
@@ -2866,12 +3061,14 @@ static int solomon_check_skiptime(unsigned long msecs)
 static int solomon_touch_down_up(int id, int xpos, int ypos,
 	int width, int isdown)
 {
-	//printk("[%d] X=%d, Y=%d, W=%d\n", id, xpos, ypos, width);
+	SOLOMON_DEBUG("[%d] X=%d, Y=%d, W=%d", id, xpos, ypos, width);
+	printk("[%d] X=%d, Y=%d, W=%d", id, xpos, ypos, width);
 	if (isdown) {
 #if defined(SUPPORT_MT_PROTOCOL_B)
 		input_mt_slot(tpd->dev, id);
-		input_mt_report_slot_state(tpd->dev,
-			MT_TOOL_FINGER, true);
+		input_mt_report_slot_state(tpd->dev,MT_TOOL_FINGER, true);
+		//input_report_abs(tpd->dev, ABS_MT_POSITION_X, xpos);
+		//input_report_abs(tpd->dev, ABS_MT_POSITION_Y, ypos);
 		input_report_abs(tpd->dev, ABS_MT_POSITION_X, ypos);
 		input_report_abs(tpd->dev, ABS_MT_POSITION_Y, (1080-xpos));
 		input_report_abs(tpd->dev, ABS_MT_WIDTH_MAJOR,
@@ -2881,6 +3078,8 @@ static int solomon_touch_down_up(int id, int xpos, int ypos,
 			width);
 #else
 		input_report_abs(tpd->dev, ABS_MT_TOUCH_MAJOR, 1);
+		//input_report_abs(tpd->dev, ABS_MT_POSITION_X, xpos);
+        //input_report_abs(tpd->dev, ABS_MT_POSITION_Y, ypos);
 		input_report_abs(tpd->dev, ABS_MT_POSITION_X, ypos);
 		input_report_abs(tpd->dev, ABS_MT_POSITION_Y, (1080-xpos));
 		input_report_abs(tpd->dev, ABS_MT_WIDTH_MAJOR,
@@ -2905,7 +3104,7 @@ static int solomon_touch_down_up(int id, int xpos, int ypos,
 	return 0;
 }
 
-#ifdef SUPPORT_PROTOCOL_6BYTES
+#if defined SUPPORT_PROTOCOL_6BYTES || defined SUPPORT_SSD2025
 static int ssd20xx_send_axis(struct solomon_device *ftdev, ssd_data axis)
 {
 	struct solomon_data *data = ftdev->ftdata;
@@ -3057,7 +3256,7 @@ static int solomon_report(struct solomon_device *ftdev)
 
 	return 0;
 }
-#endif	/* SUPPORT_PROTOCOL_6BYTES */
+#endif	/* #if defined SUPPORT_PROTOCOL_6BYTES || defined SUPPORT_SSD2025 */
 
 static int solomon_report_release(struct solomon_device *ftdev)
 {
@@ -3092,6 +3291,9 @@ static int solomon_read_points(struct solomon_device *ftdev,
 		struct solomon_data *data)
 {
 	int err = 0;
+	
+//	int ret = 0;   //-------------------
+	
 	u8 status, length;
 #ifdef SUPPORT_AUX
 	u16 aux = 0;
@@ -3104,10 +3306,14 @@ static int solomon_read_points(struct solomon_device *ftdev,
 	int retry = 3;
 #endif	/* SUPPORT_ESD_CHECKSUM */
 
+#ifdef SUPPORT_SELF_TEST
+	u16 str_read[6];
+#endif	/* SUPPORT_SELF_TEST */
+
 	if (!ftdev || !data)
 		return -EFAULT;
 
-	SOLOMON_DEBUG("solomon_read_points");
+	SOLOMON_DEBUG("[SSD] solomon_read_points\n");
 
 	if (gpio_get_value(ftdev->int_pin)) {
 		/*interrupt pin is high, not valid data.*/
@@ -3220,7 +3426,7 @@ retry_snl:
 	SOLOMON_DEBUG("status : 0x%x, %d", status, length);
 
 	/* Gesture check */
-#if defined(SUPPORT_LPM) && !defined(SUPPORT_PROTOCOL_6BYTES)
+#if defined(SUPPORT_LPM) && !defined(SUPPORT_PROTOCOL_6BYTES) && !defined(SUPPORT_SSD2025)
 	if ((status&STATUS_CHECK_PALM_GESTURE) == STATUS_CHECK_PALM_GESTURE)
 		err = solomon_read_gesture(ftdev);
 
@@ -3235,6 +3441,10 @@ retry_snl:
 		if (solomon_read_aux(ftdev->client, &aux) >= 0) {
 
 			if ((aux&SOLOMON_AUX) == SOLOMON_AUX) {
+#ifdef SUPPORT_SSD2025
+				goto out_reset;
+#else /* SUPPORT_SSD2025 */
+
 #ifdef SUPPORT_ES2
 				if (ftdev->es_version == DS_VERSION_ES2)
 					goto out_reset;
@@ -3254,7 +3464,9 @@ retry_snl:
 				}
 #endif
 				return err;
-#ifdef SUPPORT_ES2
+#endif /* SUPPORT_SSD2025 */
+
+#if defined SUPPORT_ES2 || defined SUPPORT_SSD2025
 			} else if (aux == AUX_BOOTUP_RESET) {
 				SOLOMON_WARNNING("Aux bootup reset");
 				solomon_report_release(ftdev);
@@ -3267,7 +3479,7 @@ retry_snl:
 			} else if (aux == AUX_WDTDS_INT) {
 				/* ftdev->checksum_flag = aux; */
 				goto out_reset;
-#endif
+#endif /* #if defined SUPPORT_ES2 || defined SUPPORT_SSD2025 */
 			} else if (aux == AUX_NEED_C1_TMC_RESET) {
 				/* Need TMC reset */
 				SOLOMON_WARNNING("Need TMC reset");
@@ -3308,17 +3520,22 @@ retry_snl:
 				SOLOMON_WARNNING("Aux CS error");
 				ftdev->checksum_flag = aux;
 				goto checksum;
+#ifdef SUPPORT_SELF_TEST
+			} else if ((aux & AUX_D0_SELF_TEST) == AUX_D0_SELF_TEST) {
+				solomon_read_self_test(ftdev->client, str_read);
+				solomon_writevfs_self_test(str_read);
+#endif
 			}
 		}
 	}
 #endif	/* SUPPORT_AUX */
 
-#if defined(SUPPORT_KEY_BUTTON) && !defined(SUPPORT_PROTOCOL_6BYTES)
+#if defined(SUPPORT_KEY_BUTTON) && !defined(SUPPORT_PROTOCOL_6BYTES) && !defined(SUPPORT_SSD2025)
 	if ((status & STATUS_CHECK_KEY) == STATUS_CHECK_KEY) {
 		SOLOMON_DEBUG("KEY bit set!!");
 		solomon_read_keydata_android(ftdev);
 	}
-#endif	/* SUPPORT_KEY_BUTTON */
+#endif	/* #if defined(SUPPORT_KEY_BUTTON) && !defined(SUPPORT_PROTOCOL_6BYTES) && !defined(SUPPORT_SSD2025) */
 
 #ifdef STATUS_CHECK_BOOT_ST
 	if ((status & STATUS_CHECK_BOOT_ST) == STATUS_CHECK_BOOT_ST) {
@@ -3409,7 +3626,7 @@ retry_point:
 	if (ftdev->touch_mode >= AGING_RAW_DATA_MODE)
 		solomon_get_rawdata_by_queue(ftdev);
 out:
-#if defined(SUPPORT_LPM) && !defined(SUPPORT_PROTOCOL_6BYTES)
+#if defined(SUPPORT_LPM) && !defined(SUPPORT_PROTOCOL_6BYTES) && !defined(SUPPORT_SSD2025)
 out_go:
 #endif
 #if ESD_TIMER_ENABLE
@@ -3440,6 +3657,8 @@ checksum:
 	}
 
 #if ESD_TIMER_ENABLE
+	SOLOMON_DEBUG("[ESD] use_esd_tmr 1 = %d\n",(int)ftdev->use_esd_tmr);
+
 	if (ftdev->use_esd_tmr) {
 		esd_checktime_init(ftdev);
 		esd_timer_start(SOLOMON_CHECK_ESD_TIMER, ftdev);
@@ -3482,7 +3701,11 @@ static int solomon_init_config(struct solomon_device *ftdev)
 	if (err < 0)
 		SOLOMON_WARNNING("Fail to set TOUCH_MODE %d.", val);
 
+#ifdef SUPPORT_SSD2025
+	solomon_get_version(client, &misc_dev->fw_version);
+#else
 	solomon_get_version(ftdev, ftconfig->fw_ver);
+#endif
 
 	err = ts_read_node(client, (u8 *)&ftconfig->x_node,
 			(u8 *)&ftconfig->y_node);
@@ -3554,6 +3777,8 @@ static int solomon_init_config(struct solomon_device *ftdev)
 
 	}
 #endif	/* ESD_TIMER_ENABLE */
+
+	err = solomon_set_AFE_limit(ftdev, AFE_MAX_LIMIT, AFE_MIN_LIMIT);
 
 init_config_failed:
 	ftconfig->check = true;
@@ -3815,7 +4040,10 @@ static ssize_t solomon_set_ssdtouch_attr(struct device *dev, struct device_attri
 		misc_dev->work_procedure = TS_IN_UPGRADE;
 		solomon_firmware_update_byfile(misc_dev, FW_FORCE_FULL_PATH);
 		misc_dev->work_procedure = TS_NO_WORK;
-		solomon_reset();
+		//solomon_reset();
+		solomon_bootup_multifw();
+		msleep(50);					//HTC_L2052_A01-1765
+		solomon_init(misc_dev);		//HTC_L2052_A01-1765
 		ts_enable_irq();
 		sprintf(ssd_return_str, "%s ok!\n",SSDTOUCH_UPDATE);
 	}
@@ -3925,6 +4153,7 @@ static int solomon_boot_sequence(struct solomon_device *ftdev)
 		SOLOMON_WARNNING("Reset Fail!!");
 		goto out;
 	}
+#ifndef SUPPORT_SSD2025
 #ifdef SUPPORT_ES2
 	err = ds_process_version(ftdev);
 
@@ -3932,6 +4161,7 @@ static int solomon_boot_sequence(struct solomon_device *ftdev)
 		SOLOMON_WARNNING("process version failed");
 		goto out;
 	}
+#endif
 #endif
 	/* set flag */
 	ftdev->boot_flag = 0x00;
@@ -3956,8 +4186,12 @@ static int solomon_fw_update(struct solomon_device *ftdev)
 {
 	const struct firmware *fw;
 	const char *fw_name = FW_FULL_PATH;
+	
+	int ret = 0;
 
-	solomon_power_control(ftdev, POWER_RESET);
+	printk("[ISP] solomon_fw_update\n");
+	//solomon_power_control(ftdev, POWER_RESET);
+	solomon_goto_bios();  //HTC_L2052_A01-1765
 
 	if (request_firmware(&fw, fw_name, &ftdev->client->dev) != 0) {
 		SOLOMON_TIME("H");
@@ -3966,15 +4200,29 @@ static int solomon_fw_update(struct solomon_device *ftdev)
 	} else {
 		SOLOMON_TIME("B");
 		SOLOMON_WARNNING("Update using bin file(%s)", fw_name);
-		solomon_firmware_pre_boot_up_check_bin(ftdev, fw->data,
-				fw->size);
-		SOLOMON_WARNNING("size : %lu Pre update end", fw->size);
+		solomon_firmware_pre_boot_up_check_bin(ftdev, fw->data, fw->size);
+		SOLOMON_WARNNING("size : %lu Pre update end", (long unsigned int)fw->size);
 		release_firmware(fw);
 	}
-	solomon_power_control(ftdev, POWER_RESET);
-	/* solomon_reset(); */
 
-	return 0;
+	//solomon_power_control(ftdev, POWER_RESET);
+	/* solomon_reset(); */
+	solomon_bootup_multifw();
+	msleep(50);
+	
+	solomon_fw_init(ftdev);
+
+	if (ds_clear_int(ftdev->client) < 0)
+		return -1;
+	if (sint_unstall(ftdev->client) < 0)
+		return -1;
+
+	ret = int_pin_check(ftdev, 200);
+		
+	return ret;
+
+
+	//return 0;
 }
 #if (defined(SUPPORT_BOOTUP_FORCE_FW_UPGRADE_BINFILE) && defined(SUPPORT_BOOTUP_FW_UPGRADE_BINFILE))
 static void solomon_repeat_fw_update_controller(const struct firmware *fw,
@@ -4000,7 +4248,7 @@ static void solomon_repeat_fw_update_controller(const struct firmware *fw,
 			SOLOMON_WARNNING("Update using bin file [repeat]");
 			err = solomon_firmware_pre_boot_up_check_bin(dev,
 					fw->data, fw->size);
-			SOLOMON_WARNNING("size : %lu Pre update end [repeat]", fw->size);
+			SOLOMON_WARNNING("size : %lu Pre update end [repeat]", (long unsigned int)fw->size);
 			release_firmware(fw);
 		}
 		if (err > 0) {
@@ -4028,8 +4276,7 @@ static void solomon_repeat_fw_update_controller(const struct firmware *fw,
 }
 #endif
 #if (defined(SUPPORT_BOOTUP_FORCE_FW_UPGRADE_BINFILE) || defined(SUPPORT_BOOTUP_FW_UPGRADE_BINFILE))
-static void solomon_fw_update_controller(const struct firmware *fw,
-		void *context)
+static void solomon_fw_update_controller(const struct firmware *fw, void *context)
 {
 	struct solomon_device *dev = context;
 	int err = 0;
@@ -4094,7 +4341,7 @@ static void solomon_fw_update_controller(const struct firmware *fw,
 	} else {
 		SOLOMON_WARNNING("solomon device is null");
 	}
-	SOLOMON_WARNNING("Update routine closed!!");
+	SOLOMON_WARNNING("Update routine closed++!!");
 	SOLOMON_TIME("E");
 }
 #endif
@@ -4182,6 +4429,7 @@ static int solomon_probe(struct i2c_client *client,
 		TPD_DMESG("Failed to enable reg-vgp6: %d\n", err);
 
 	INIT_WORK(&ftdev->work, solomon_work);
+	init_bringUP_flag = 1;
 	solomon_hw_init();
 	ftdev->reset_pin = tpd_rst_gpio_number;
 	ftdev->irq = touch_irq;
@@ -4386,35 +4634,10 @@ static void solomon_suspend(struct device *dev)
 
 #ifndef CONFIG_HAS_EARLYSUSPEND
 #ifndef SUPPORT_LPM
-#ifdef __HCT_TP_GESTURE_SUPPORT__
-    #if __HCT_TP_GESTURE_SUPPORT__
-	if(tpgesture_status==1)
-		{
-		ts_disable_irq();
-		} //hct
-	#else
-		ts_disable_irq();
-    #endif
-#endif		
-		
-		
+	ts_disable_irq();
 #endif	/* SUPPORT_LPM */
 	flush_workqueue(ftdev->workqueue);
 #endif	/* CONFIG_HAS_EARLYSUSPEND */
-
-
-
-
-#ifdef __HCT_TP_GESTURE_SUPPORT__
-#if __HCT_TP_GESTURE_SUPPORT__		
-		if(tpgesture_status==1)
-		{
-			memset(tpgesture_value,0,10);
-        		tpgesture_hander();
-
-		}		
-#endif
-#endif	
 
 #if ESD_TIMER_ENABLE
 	if (ftdev->use_esd_tmr) {
@@ -4443,6 +4666,11 @@ static void solomon_suspend(struct device *dev)
 static void solomon_resume(struct device *dev)
 {
 	struct solomon_device *ftdev = NULL;
+#if defined(SUPPORT_LPM) && defined(SUPPORT_SELF_TEST)
+	u16	st_val;
+	int err1 = 0;
+#endif
+
 #ifdef SUPPORT_LPM
 	int err = 0;
 #endif	/* SUPPORT_LPM */
@@ -4480,6 +4708,13 @@ static void solomon_resume(struct device *dev)
 		SOLOMON_WARNNING("esd timer start");
 	}
 #endif	/* ESD_TIMER_ENABLE */
+
+#if defined(SUPPORT_LPM) && defined(SUPPORT_SELF_TEST)
+	st_val=0x0001;
+	err1 = ts_write_data(ftdev->client, SOLOMON_SELF_TEST, (u8 *)&st_val, 2);
+	if (err1 < 0)
+		SOLOMON_WARNNING("error : trigger self test");
+#endif
 
 	SOLOMON_DEBUG("\n>>>> %s solomon resume end!!!", __func__);
 	return;
@@ -4533,13 +4768,13 @@ static int tpd_local_init(void)
 	int retval = 0;
 
 	TPD_DMESG("SSL SSD20xx I2C Touchscreen Driver...\n");
+
 	tpd->reg = regulator_get(tpd->tpd_dev, "vio18");
 	retval = regulator_set_voltage(tpd->reg, 1800000, 1800000);
 	if (retval != 0) {
 		TPD_DMESG("Failed to set reg-vgp6 voltage: %d\n", retval);
 		return -1;
 	}
-
 	if (i2c_add_driver(&solomon_driver) != 0) {
 		TPD_DMESG("unable to add i2c driver.\n");
 		return -1;
